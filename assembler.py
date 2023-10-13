@@ -151,27 +151,26 @@ def num_to_bits(num, len):
     bit = bin(num & (2**len-1))[2:].zfill(len)
     return bit
 
-def convert_mips_to_binary(line):
+def convert_mips_to_binary(line, address):
     tokens = line.strip('\n\t').split()
     for i in range(len(tokens)):
         tokens[i] = tokens[i].strip(',')
     for i in inst_list:
         if i.name == tokens[0]:
             word = i.op
-            address = 0
             # write the SLL, SRL, JR and etc that R format and complex
             if i.type == 'R':
-                print(tokens)
-                # pass the str if needed
-                rd, rs, rt = tokens[1], tokens[2], tokens[3]
-                word = word + num_to_bits(int(rs.strip('$')), 5)
-                word = word + num_to_bits(int(rt.strip('$')), 5)
-                word = word + num_to_bits(int(rd.strip('$')), 5)
-                word = word + num_to_bits(0, 5)
-                if i.funct == "":
-                    word = word + num_to_bits(0, 6)
-                else:
-                    word = word + i.funct
+                #check if there are enought tokens
+                if len(tokens) >= 4:
+                    rd, rs, rt = tokens[1], tokens[2], tokens[3]
+                    word = word + num_to_bits(int(rs.strip('$')), 5)
+                    word = word + num_to_bits(int(rt.strip('$')), 5)
+                    word = word + num_to_bits(int(rd.strip('$')), 5)
+                    word = word + num_to_bits(0, 5)
+                    if i.funct == "":
+                        word = word + num_to_bits(0, 6)
+                    else:
+                        word = word + i.funct
             elif i.type == 'I':
                 if i.name == 'lw' or i.name == 'sw':
                     rt, offset, rs = tokens[1], tokens[2], tokens[3]
@@ -252,14 +251,14 @@ def make_symbol_table(input):
             '''
             blank
             '''
+            global data_section_size
             if temp[-1] == ':':
                 symbol = symbol_t()
                 symbol.name = temp[:-1]
-                symbol.address = ctypes.c_uint(address).value
+                symbol.address = ctypes.c_uint(data_section_size + MEM_DATA_START).value
                 symbol_table_add_entry(symbol)
 
             word = line.find(".word")
-            global data_section_size
             if word != -1:
                 data_seg.write("%s\n" % line[word:])
                 data_section_size += BYTES_PER_WORD
@@ -271,37 +270,38 @@ def make_symbol_table(input):
             if temp[-1] == ":":
                 symbol = symbol_t()
                 symbol.name = temp[:-1]
-                symbol.address = ctypes.c_uint(address).value
+                symbol.address = ctypes.c_uint(address + MEM_TEXT_START).value
                 symbol_table_add_entry(symbol)
                 continue
             global text_section_size 
             cnt = 1
             if temp == 'la':
                 target = str(hex(convert_label(token_line[2])))
-                text_seg.write(convert_mips_to_binary('lui\t'+token_line[1]+'\t'+target[:-4])+'\n')
+                text_seg.write(('lui '+token_line[1]+' '+target[:-4])+'\n')
                 cnt = 1
+                if target[-4:] != '0000':
+                    text_seg.write(('ori '+token_line[1]+' '+token_line[1]+' 0x'+target[-4:])+'\n')
+                    cnt = 2
             elif temp == 'move':
-                text_seg.write(convert_mips_to_binary('addi\t'+token_line[1]+'\t'+token_line[2]+',\t0')+'\n')
+                text_seg.write(('addi '+token_line[1]+' '+token_line[2]+', 0')+'\n')
                 cnt = 1
             elif temp == 'blt':
-                text_seg.write(convert_mips_to_binary('slt\t$1,\t'+token_line[1]+'\t'+token_line[2])+'\n')
-                text_seg.write(convert_mips_to_binary('bne\t$1,\t0,\t'+token_line[3])+'\n')
+                text_seg.write(('slt $1, '+token_line[1]+' '+token_line[2])+'\n')
+                text_seg.write(('bne $1, 0, '+token_line[3])+'\n')
                 cnt = 2
-            elif temp == 'push': #todo
-                text_seg.write(convert_mips_to_binary('addi\t$29,\t$29,\t-4')+'\n')
-                text_seg.write(convert_mips_to_binary('sw\t'+token_line[1]+'\t0($29)\n')+'\n')
+            elif temp == 'push':
+                text_seg.write(('addi $29, $29, -4')+'\n')
+                text_seg.write(('sw '+token_line[1]+' 0($29)\n'))
                 cnt = 2
             elif temp == 'pop':
-                text_seg.write(convert_mips_to_binary('lw\t'+token_line[1]+'\t0($29)\n')+'\n')
-                text_seg.write(convert_mips_to_binary('addi\t$29,\t$29,\t4')+'\n')
+                text_seg.write(('lw '+token_line[1]+' 0($29)\n'))
+                text_seg.write(('addi $29, $29, 4')+'\n')
                 cnt = 2
             else:
-                text_seg.write(convert_mips_to_binary(line) + '\n')
+                text_seg.write((line) + '\n')
                 cnt = 1
             address += BYTES_PER_WORD * cnt
             text_section_size += BYTES_PER_WORD * cnt
-                
-
 
 #create mips instructions: la, move, blt, push, pop and else
 def record_text_section(fout):
@@ -312,58 +312,22 @@ def record_text_section(fout):
     lines = text_seg.readlines()
     for line in lines:
         line = line.strip()
+        binary_code = convert_mips_to_binary(line, cur_addr)
+        # print(binary_code)
         inst_type, rs, rt, rd, imm, shamt = '0', 0, 0, 0, 0, 0
-        
+        if DEBUG: 
+            text_seg.seek(0)
+            lines = text_seg.readlines()
+            for line in lines: 
+                line = line.strip()
+                inst_type, rs, rt, rd, imm, shamt = '0', 0, 0, 0, 0, 0
         '''
         blank: Find the instruction type that matches the line
         '''
-        # for i in inst_list: 
-        #     if i.op == line[:6]:
-        #         inst_type = i.type 
-        #         op = i.op
-        #         funct = i.funct
-        #         if i.type == 'R': 
-        #             rd = int(line[16:21], 2)
-        #             rs = int(line[6:11], 2)
-        #             rt = int(line[11:16], 2)
-        #             shamt = int(line[21:26], 2)
-        #         elif i.type == 'I': 
-        #             rs = int(line[6:11], 2)
-        #             rt = int(line[11:16], 2)
-        #             imm = int(line[16:], 2)
-        #         elif i.type == 'J':
-        #             adr = int(line[6:], 2)
-        fout.write(line)
-        # if inst_type == 'R':
-        #     '''
-        #     blank
-        #     '''
-        #     print(funct)
-        #     # fout.write(num_to_bits(int(op + num_to_bits(rs, 5) + num_to_bits(rt, 5) + num_to_bits(rd, 5) + num_to_bits(shamt, 5) + funct, 2), 32))
-        #     fout.write(op + str(num_to_bits(rs, 5)) + str(num_to_bits(rt, 5)) + str(num_to_bits(rd, 5)) + str(num_to_bits(shamt, 5)) + funct)
-        # if inst_type == 'I':
-        #     '''
-        #     blank
-        #     '''
-        #     fout.write(num_to_bits(int(op + num_to_bits(rs, 5) + num_to_bits(rt, 5) + num_to_bits(imm, 16), 2), 32))
-
-        # if inst_type == 'J':
-        #     '''
-        #     blank
-        #     '''
-        #     fout.write(num_to_bits(int(op + num_to_bits(adr, 26), 2), 32))
-
-        # if DEBUG:
-        #     if inst_type == 'R':
-        #         log(1, f"0x{hex(cur_addr)[2:].zfill(8)}: op: {op} rs:${rs} rt:${rt} rd:${rd} shamt:{shamt} funct:{i.funct}")
-        #     elif inst_type == 'I':
-        #         log(1, f"0x{hex(cur_addr)[2:].zfill(8)}: op:{op} rs:${rs} rt:${rt} imm:0x{hex(imm)[2:].zfill(4)}")
-        #     elif inst_type == 'J':
-        #         log(1, f"0x{hex(cur_addr)[2:].zfill(8)}: op:{op} addr:{hex(adr)[2:].zfill(8)}")
-
+        #fout.write(line)
+        fout.write(binary_code)
         fout.write("\n")
         cur_addr += BYTES_PER_WORD
-
 
 def record_data_section(fout):
     cur_addr = MEM_DATA_START
@@ -379,13 +343,15 @@ def record_data_section(fout):
         token_line = line.strip('\n\t').split()
         data = token_line[-1]
         data = int(data, 0)
-        fout.write("%s\n" % num_to_bits(data, 32))
+        try:
+            fout.write("%s\n" % num_to_bits(data, 32))
+        except Exception as e:
+            log(3, f"Error writing to output file: {e}")
 
         if DEBUG:
             log(1, f"0x" + hex(cur_addr)[2:].zfill(8) + f": {line}")
 
         cur_addr += BYTES_PER_WORD
-
 
 def make_binary_file(fout):
     if DEBUG:
@@ -489,3 +455,4 @@ if __name__ == '__main__':
 
     f_in.close()
     f_out.close()
+
